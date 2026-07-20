@@ -1,0 +1,6 @@
+opencv-python 
+ultralytics 
+torch 
+pandas 
+scikit-learn 
+pyttsx3
