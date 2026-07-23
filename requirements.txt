@@ -1,0 +1,19 @@
+# ── Core detection ──────────────────────────────────────────────────────────
+ultralytics          # YOLOv8 object detection
+opencv-python        # webcam capture and drawing
+
+# ── LLM (natural language descriptions) ─────────────────────────────────────
+ollama               # Python client for the local Ollama server
+                     # NOTE: Ollama itself is a separate install — see README
+
+# ── Text-to-speech ───────────────────────────────────────────────────────────
+pyttsx3              # cross-platform TTS fallback
+pywin32              # Windows SAPI COM interface (primary voice engine)
+
+# ── Distance model training ──────────────────────────────────────────────────
+torch                # neural network for distance regression
+pandas               # CSV handling
+scikit-learn         # train/test split and feature scaling
+
+# ── Synthetic dataset generation ─────────────────────────────────────────────
+Pillow               # image creation for synthetic training data
