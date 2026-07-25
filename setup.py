@@ -63,8 +63,26 @@ def install_packages():
 # Step 2 — Ollama application
 # ---------------------------------------------------------------------------
 
+# Ollama installs here on Windows — check both PATH and known locations
+_OLLAMA_EXE_PATHS = (
+    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Ollama", "ollama.exe"),
+    os.path.join(os.environ.get("ProgramFiles",  ""), "Ollama", "ollama.exe"),
+)
+
+
+def find_ollama_exe() -> str | None:
+    """Return the ollama.exe path whether or not it's on PATH yet."""
+    # Check PATH first
+    found = shutil.which("ollama")
+    if found:
+        return found
+    # Fall back to known install locations (useful right after install
+    # when the user cancelled the welcome dialog before PATH was refreshed)
+    return next((p for p in _OLLAMA_EXE_PATHS if p and os.path.isfile(p)), None)
+
+
 def ollama_in_path() -> bool:
-    return shutil.which("ollama") is not None
+    return find_ollama_exe() is not None
 
 
 def ollama_api_running() -> bool:
@@ -111,34 +129,36 @@ def install_ollama():
         print("  Then run this script again.")
         sys.exit(1)
 
-    print("  Running installer — follow the on-screen prompts...")
+    print("  Running installer — complete the installation, then close any welcome dialogs.")
+    print("  (You can safely close/cancel the 'Get Started' popup after installing.)")
     subprocess.run([str(installer)], check=False)
     installer.unlink(missing_ok=True)   # clean up temp file
 
-    # Wait for ollama to appear on PATH
-    print("  Waiting for Ollama to become available", end="", flush=True)
-    for _ in range(30):
+    # After the installer exits, check both PATH and known file locations.
+    # The welcome dialog being cancelled does NOT undo the installation.
+    print("  Checking if Ollama was installed", end="", flush=True)
+    for _ in range(15):
         time.sleep(1)
         print(".", end="", flush=True)
-        if ollama_in_path():
+        if find_ollama_exe():
             print()
             ok("Ollama installed successfully.")
             return
 
     print()
-    warn("Ollama not detected on PATH yet — you may need to restart your terminal.")
-    warn("After restarting, run:  python setup.py  again.")
+    # One last check before giving up
+    if find_ollama_exe():
+        ok("Ollama found.")
+        return
+
+    warn("Could not find Ollama after installation.")
+    warn("Please restart your terminal and run:  python setup.py  again.")
     sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
 # Step 3 — Start Ollama server if needed
 # ---------------------------------------------------------------------------
-
-_OLLAMA_EXE_PATHS = (
-    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Ollama", "ollama.exe"),
-    os.path.join(os.environ.get("ProgramFiles",  ""), "Ollama", "ollama.exe"),
-)
 
 
 def ensure_server_running():
@@ -148,8 +168,8 @@ def ensure_server_running():
         ok("Ollama server is already running.")
         return
 
-    # Try to launch it
-    exe = next((p for p in _OLLAMA_EXE_PATHS if p and os.path.isfile(p)), None)
+    # Use find_ollama_exe() which checks both PATH and known install locations
+    exe = find_ollama_exe()
     if exe:
         subprocess.Popen(
             [exe, "serve"],
