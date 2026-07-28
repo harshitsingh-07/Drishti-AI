@@ -352,23 +352,94 @@ class AnnouncementTracker:
 
 
 class DistanceEstimator:
-    """Estimates distance to object based on bounding box size"""
+    """Estimates distance to object using trained model with EMA smoothing"""
 
-    @staticmethod
-    def estimate(detection: Detection, frame_width: int, frame_height: int) -> float:
-        """Estimate distance using simple heuristic (will be replaced by ML model)"""
-        frame_area = frame_width * frame_height
-        ratio = detection.area / max(frame_area, 1)
+    def __init__(self, model_path: str = "distance_model.pth"):
+        self.model_path = model_path
+        self.checkpoint = None
+        self.scaler = None
+        self.gbr_model = None
+        self.rf_model = None
+        self.ema_history: Dict[str, float] = {}
+        self._load_model()
 
-        if ratio > 0.20:
-            return 0.6
-        if ratio > 0.10:
-            return 1.2
-        if ratio > 0.05:
-            return 2.0
-        if ratio > 0.02:
-            return 3.0
-        return 4.5
+    def _load_model(self) -> None:
+        if not os.path.exists(self.model_path):
+            return
+        try:
+            import torch
+            ckpt = torch.load(self.model_path, map_location="cpu", weights_only=False)
+            if isinstance(ckpt, dict):
+                self.checkpoint = ckpt
+                self.scaler = ckpt.get("scaler", None)
+                self.gbr_model = ckpt.get("gbr_model", None)
+                self.rf_model = ckpt.get("rf_model", None)
+                print("[DistanceEstimator] Trained distance model loaded ✓")
+        except Exception as err:
+            print(f"[DistanceEstimator] Failed to load {self.model_path}: {err}. Using heuristic.")
+
+    def estimate(self, detection: Detection, frame_width: int, frame_height: int) -> float:
+        """Estimate distance using trained model or fallback heuristic with EMA smoothing"""
+        raw_distance = None
+
+        if (self.gbr_model is not None or self.rf_model is not None) and self.scaler is not None:
+            try:
+                import numpy as np
+
+                w = float(detection.width)
+                h = float(detection.height)
+                area = float(detection.area)
+                y_center = float(detection.center_y)
+                y_bottom = float(detection.center_y + h / 2.0)
+
+                cls_name = detection.class_name.lower().strip()
+                from train_distance_model import OBJECT_PHYSICAL_PRIORS
+                prior_h = OBJECT_PHYSICAL_PRIORS.get(cls_name, (1.0, 1.0))[0]
+                d_optics = 400.0 * prior_h / max(h, 1.0)
+
+                ground_dist_proxy = 100.0 / max(float(frame_height) - y_bottom, 5.0)
+
+                inv_w = 1.0 / max(w, 1.0)
+                inv_h = 1.0 / max(h, 1.0)
+                inv_sqrt_area = 1.0 / np.sqrt(max(area, 1.0))
+                aspect_ratio = w / max(h, 1.0)
+                log_area = np.log1p(area)
+
+                numeric = np.array([[
+                    w, h, area, y_center, y_bottom, inv_w, inv_h, inv_sqrt_area, aspect_ratio, log_area, ground_dist_proxy, d_optics
+                ]], dtype=float)
+
+
+                X = self.scaler.transform(numeric)
+
+                if self.gbr_model is not None:
+                    pred_log = self.gbr_model.predict(X)[0]
+                    raw_distance = float(np.clip(np.exp(pred_log), 0.3, 10.0))
+                elif self.rf_model is not None:
+                    pred_log = self.rf_model.predict(X)[0]
+                    raw_distance = float(np.clip(np.exp(pred_log), 0.3, 10.0))
+            except Exception as exc:
+                pass
+
+        if raw_distance is None:
+            frame_area = frame_width * frame_height
+            ratio = detection.area / max(frame_area, 1)
+            if ratio > 0.20: raw_distance = 0.6
+            elif ratio > 0.10: raw_distance = 1.2
+            elif ratio > 0.05: raw_distance = 2.0
+            elif ratio > 0.02: raw_distance = 3.0
+            else: raw_distance = 4.5
+
+        # Apply 5-frame Exponential Moving Average (EMA) smoothing per object class
+        cls_key = detection.class_name
+        if cls_key in self.ema_history:
+            smoothed = 0.7 * raw_distance + 0.3 * self.ema_history[cls_key]
+        else:
+            smoothed = raw_distance
+        self.ema_history[cls_key] = smoothed
+        return smoothed
+
+
 
 
 # LLM narration runs in a bounded worker thread; on timeout or error the caller

@@ -21,8 +21,10 @@ def test_prepare_dataset_returns_expected_shapes() -> None:
 
     result = prepare_dataset(frame, test_size=0.25, random_state=42)
 
-    assert result["X_train"].shape[1] == 4
-    assert result["X_test"].shape[1] == 4
+    # 14 numeric features + 2 one-hot class columns = 16 total features
+    assert result["X_train"].shape[1] == 16
+    assert result["X_test"].shape[1] == 16
     assert result["y_train"].shape[0] == 3
     assert result["y_test"].shape[0] == 1
-    assert result["feature_columns"] == ["width", "height", "area"]
+    assert "focal_ratio_h" in result["feature_columns"]
+    assert "prior_h" in result["feature_columns"]

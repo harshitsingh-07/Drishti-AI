@@ -1,0 +1,38 @@
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.label {
+  margin: 0;
+  font-size: 12px;
+  color: #9aa5ac;
+  line-height: 1.4;
+}
+
+.value {
+  margin: 0;
+  font-size: 15px;
+  color: #f5f1ea;
+  line-height: 1.5;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background-color: #1e252b;
+  border: 1px solid #2a333a;
+  border-radius: 14px;
+  padding: 18px 20px;
+}
+
+.title {
+  margin: 0;
+  font-family: var(--font-heading);
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--color-text-primary);
+  line-height: 1.4;
+}

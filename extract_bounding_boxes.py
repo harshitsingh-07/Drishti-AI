@@ -9,18 +9,14 @@ from ultralytics import YOLO
 from dataset_utils import parse_filename
 
 
-def detect_object_bbox(image_path: str | Path, model: YOLO, target_class: Optional[str] = None) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[str]]:
-    """Run YOLO on a single image and return width, height, area and class name.
-
-    The target_class is optional. When provided, the function prefers a detection whose
-    class name matches the target class, otherwise the highest-confidence detection is used.
-    """
+def detect_object_bbox(image_path: str | Path, model: YOLO, target_class: Optional[str] = None) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], Optional[str]]:
+    """Run YOLO on a single image and return width, height, area, y_center, y_bottom and class name."""
     results = model(str(image_path), stream=False, conf=0.25)
     result = results[0]
 
     boxes = result.boxes
     if boxes is None or len(boxes) == 0:
-        return None, None, None, None
+        return None, None, None, None, None, None
 
     model_names = model.names
     best_box = None
@@ -51,14 +47,16 @@ def detect_object_bbox(image_path: str | Path, model: YOLO, target_class: Option
                 best_box = box
 
     if best_box is None:
-        return None, None, None, None
+        return None, None, None, None, None, None
 
     x_center, y_center, width, height = best_box.xywh[0].tolist()
     width = float(width)
     height = float(height)
+    y_center = float(y_center)
+    y_bottom = float(y_center + height / 2.0)
     area = width * height
     class_name = model_names[int(best_box.cls[0])]
-    return width, height, area, class_name
+    return width, height, area, y_center, y_bottom, class_name
 
 
 def build_dataset(input_dir: str | Path, output_csv: str | Path, model_path: str = "yolov8n.pt") -> None:
@@ -85,7 +83,7 @@ def build_dataset(input_dir: str | Path, output_csv: str | Path, model_path: str
             print(f"Skipped {image_path.name}: filename does not match the expected pattern")
             continue
 
-        width, height, area, class_name = detect_object_bbox(image_path, model, target_class=object_name)
+        width, height, area, y_center, y_bottom, class_name = detect_object_bbox(image_path, model, target_class=object_name)
         if width is None or height is None or area is None:
             print(f"Skipped {image_path.name}: YOLO did not detect any object. Make sure the object is clearly visible in the image and the image is not blank.")
             continue
@@ -95,18 +93,22 @@ def build_dataset(input_dir: str | Path, output_csv: str | Path, model_path: str
                 "width": width,
                 "height": height,
                 "area": area,
+                "y_center": y_center,
+                "y_bottom": y_bottom,
                 "object_class": class_name,
                 "distance": distance,
             }
         )
 
     output_csv.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["width", "height", "area", "y_center", "y_bottom", "object_class", "distance"]
     with output_csv.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["width", "height", "area", "object_class", "distance"])
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
     print(f"Saved {len(rows)} rows to {output_csv}")
+
 
 
 def main() -> None:

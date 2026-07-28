@@ -4,9 +4,10 @@ from typing import Optional, Tuple
 
 
 _FILENAME_PATTERN = re.compile(
-    r"^(?P<object>.+)_(?P<distance>\d+(?:\.\d+)?)m_(?P<index>\d+)\.(?P<ext>jpe?g|png)$",
+    r"^(?P<object>.+)_(?P<distance>\d+(?:\.\d+)?)m_(?P<index>[\d_]+)\.(?P<ext>jpe?g|png)$",
     re.IGNORECASE,
 )
+
 
 
 def parse_filename(image_path: str | Path) -> Tuple[Optional[str], Optional[float]]:
