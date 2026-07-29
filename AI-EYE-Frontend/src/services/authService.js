@@ -1,10 +1,6 @@
-const AUTH_DELAY_MS = 500
+import axios from 'axios'
 
-function delay(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms)
-  })
-}
+const API_BASE_URL = 'http://localhost:5000/api'
 
 function normalizeError(error, fallbackMessage) {
   if (error instanceof Error) {
@@ -13,14 +9,13 @@ function normalizeError(error, fallbackMessage) {
   return new Error(fallbackMessage)
 }
 
-function buildStubUser({ email, username, fullName, ...profile }) {
+function buildUser(data) {
   return {
-    id: `user_${Date.now()}`,
-    email,
-    username: username ?? email?.split('@')[0] ?? 'user',
-    fullName: fullName ?? username ?? 'AI-EYE User',
-    token: `stub_token_${Date.now()}`,
-    ...profile,
+    id: data.id,
+    email: data.email,
+    username: data.username,
+    fullName: data.fullName,
+    token: data.token,
   }
 }
 
@@ -30,16 +25,11 @@ export async function loginUser(email, password) {
       throw new Error('Email and password are required.')
     }
 
-    // replace with real fetch/axios call
-    await delay(AUTH_DELAY_MS)
-
-    return buildStubUser({
-      email: email.trim(),
-      username: email.trim().split('@')[0],
-      fullName: email.trim().split('@')[0],
-    })
+    const response = await axios.post(`${API_BASE_URL}/auth/login`, { email, password })
+    return buildUser(response.data)
   } catch (error) {
-    throw normalizeError(error, 'Login failed. Please try again.')
+    const message = error?.response?.data?.message || 'Login failed. Please try again.'
+    throw normalizeError(new Error(message), 'Login failed. Please try again.')
   }
 }
 
@@ -69,10 +59,7 @@ export async function registerUser(formData) {
       throw new Error('Full name and username are required.')
     }
 
-    // replace with real fetch/axios call
-    await delay(AUTH_DELAY_MS)
-
-    return buildStubUser({
+    const response = await axios.post(`${API_BASE_URL}/auth/register`, {
       fullName: fullName.trim(),
       username: username.trim(),
       email: email.trim(),
@@ -85,9 +72,18 @@ export async function registerUser(formData) {
       preferredLanguage,
       emergencyContactName,
       emergencyContactNo,
-      hasCertificate: Boolean(certificateFile),
+      certificateFile,
+      password,
     })
+
+    return buildUser(response.data)
   } catch (error) {
-    throw normalizeError(error, 'Registration failed. Please try again.')
+    const message = error?.response?.data?.message || 'Registration failed. Please try again.'
+    throw normalizeError(new Error(message), 'Registration failed. Please try again.')
   }
+}
+
+export async function detectObjects(imageBase64) {
+  const response = await axios.post(`${API_BASE_URL}/detect`, { image: imageBase64 })
+  return response.data
 }

@@ -41,10 +41,10 @@ class Config:
     camera_index:        int   = 0
 
     # Detection
-    confidence:          float = 0.35   # minimum YOLO confidence to keep a box
+    confidence:          float = 0.45   # minimum YOLO confidence to keep a box
     iou_threshold:       float = 0.45   # overlap threshold for NMS
     inference_fps:       float = 10.0   # how many times per second we run YOLO
-    stable_frames:       int   = 3      # frames an object must appear before we announce it
+    stable_frames:       int   = 4      # frames an object must appear before we announce it
 
     # Voice
     speech_rate:         int   = 160    # words per minute
@@ -55,7 +55,7 @@ class Config:
     use_llm:             bool  = True
     llm_model:           str   = "qwen2.5:0.5b"
     llm_timeout:         float = 12.0   # seconds to wait for a response
-    llm_max_tokens:      int   = 35
+    llm_max_tokens:      int   = 25
 
     # UI
     window_title:        str   = "AI Eye"
@@ -259,16 +259,15 @@ class Detection:
 
 def position_of(cx: float, frame_w: int) -> Tuple[str, str]:
     """Return (side, navigation_hint) based on where the object sits in frame."""
-    if cx < frame_w * 0.35:
+    if cx < frame_w * 0.40:
         return "left", "move right"
-    if cx > frame_w * 0.65:
+    if cx > frame_w * 0.60:
         return "right", "move left"
     return "center", "stay on course"
 
 
-def tracking_key(label: str, cx: float, frame_w: int) -> Tuple[str, str]:
-    side, _ = position_of(cx, frame_w)
-    return label.lower(), side
+def tracking_key(label: str) -> str:
+    return label.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -284,15 +283,15 @@ class Stabilizer:
 
     def __init__(self, min_frames: int):
         self.min_frames = min_frames
-        self._counts:  Dict[Tuple[str, str], int] = {}
-        self._objects: Dict[Tuple[str, str], Detection] = {}
+        self._counts:  Dict[str, int] = {}
+        self._objects: Dict[str, Detection] = {}
 
     def update(self, detections: List[Detection], frame_w: int) -> List[Detection]:
         seen = set()
         confirmed = []
 
         for det in detections:
-            key = tracking_key(det.label, det.cx, frame_w)
+            key = tracking_key(det.label)
             seen.add(key)
             self._counts[key] = self._counts.get(key, 0) + 1
             self._objects[key] = det
@@ -397,9 +396,11 @@ class Narrator:
             return None
 
         prompt = (
-            "You are a navigation assistant for a blind person. "
-            "Write ONE short spoken sentence (max 20 words) describing what is ahead. "
-            "Mention the closest object first. No punctuation tricks, no quotes, no labels.\n\n"
+            "You are a voice guide. Make a single, short sentence from the facts below. "
+            "Address the user directly using 'your left', 'your right', or 'straight ahead'. "
+            "Do NOT add ANY extra details, environments (like streets or buildings), or guess relationships.\n\n"
+            "Example Scene:\nperson, 1.2 m, on the left\n"
+            "Example Sentence: You have a person on your left at 1.2 meters.\n\n"
             "Scene:\n" + "\n".join(facts) + "\n\nSentence:"
         )
 
