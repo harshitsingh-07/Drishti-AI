@@ -5,34 +5,12 @@ from typing import Dict
 import numpy as np
 import pandas as pd
 import torch
+from sklearn.ensemble import ExtraTreesRegressor, HistGradientBoostingRegressor, RandomForestRegressor, VotingRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
-
-
-class DistanceRegressor(nn.Module):
-    def __init__(self, input_dim: int) -> None:
-        super().__init__()
-        self.network = nn.Sequential(
-            nn.Linear(input_dim, 64),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(64, 32),
-            nn.BatchNorm1d(32),
-            nn.ReLU(),
-            nn.Dropout(0.05),
-            nn.Linear(32, 16),
-            nn.ReLU(),
-            nn.Linear(16, 1),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.network(x)
-
 
 OBJECT_PHYSICAL_PRIORS = {
+    "person": (1.7, 0.5),
     "chair": (0.9, 0.6),
     "bus": (3.2, 2.5),
     "bike": (1.0, 1.7),
@@ -44,6 +22,16 @@ OBJECT_PHYSICAL_PRIORS = {
     "traffic light": (1.2, 0.4),
     "tennis racket": (0.7, 0.3),
     "kite": (0.8, 0.8),
+    "sports ball": (0.22, 0.22),
+    "airplane": (3.5, 10.0),
+    "bottle": (0.25, 0.08),
+    "cell phone": (0.15, 0.07),
+    "laptop": (0.25, 0.35),
+    "cup": (0.12, 0.08),
+    "tv": (0.6, 1.0),
+    "couch": (0.9, 1.8),
+    "car": (1.5, 1.8),
+    "desk": (0.75, 1.2),
 }
 
 
@@ -57,7 +45,11 @@ def compute_features(dataframe: pd.DataFrame) -> np.ndarray:
 
     classes = dataframe["object_class"].astype(str).tolist() if "object_class" in dataframe else ["chair"] * len(w)
     prior_h = np.array([OBJECT_PHYSICAL_PRIORS.get(c.lower().strip(), (1.0, 1.0))[0] for c in classes], dtype=float)
-    d_optics = 400.0 * prior_h / np.maximum(h, 1.0)
+    prior_w = np.array([OBJECT_PHYSICAL_PRIORS.get(c.lower().strip(), (1.0, 1.0))[1] for c in classes], dtype=float)
+
+    focal_len = 400.0
+    d_optics_h = focal_len * prior_h / np.maximum(h, 1.0)
+    d_optics_w = focal_len * prior_w / np.maximum(w, 1.0)
 
     ground_dist_proxy = 100.0 / np.maximum(480.0 - y_bottom, 5.0)
 
@@ -68,7 +60,7 @@ def compute_features(dataframe: pd.DataFrame) -> np.ndarray:
     log_area = np.log1p(area)
 
     return np.column_stack([
-        w, h, area, y_center, y_bottom, inv_w, inv_h, inv_sqrt_area, aspect_ratio, log_area, ground_dist_proxy, d_optics
+        w, h, area, y_center, y_bottom, inv_w, inv_h, inv_sqrt_area, aspect_ratio, log_area, ground_dist_proxy, d_optics_h, d_optics_w
     ])
 
 
@@ -80,7 +72,11 @@ def prepare_dataset(dataframe: pd.DataFrame, test_size: float = 0.2, random_stat
     scaler = StandardScaler()
     scaled_numeric = scaler.fit_transform(numeric_features)
 
-    X = scaled_numeric
+    ohe = OneHotEncoder(sparse_output=False, handle_unknown="ignore")
+    classes_df = dataframe[["object_class"]] if "object_class" in dataframe else pd.DataFrame({"object_class": ["chair"] * len(dataframe)})
+    cat_encoded = ohe.fit_transform(classes_df)
+
+    X = np.hstack([scaled_numeric, cat_encoded])
     y = dataframe["distance"].to_numpy(dtype=float)
 
     X_train, X_test, y_train, y_test = train_test_split(
@@ -91,7 +87,7 @@ def prepare_dataset(dataframe: pd.DataFrame, test_size: float = 0.2, random_stat
     )
 
     feature_columns = [
-        "width", "height", "area", "y_center", "y_bottom", "inv_w", "inv_h", "inv_sqrt_area", "aspect_ratio", "log_area", "ground_dist_proxy", "d_optics"
+        "width", "height", "area", "y_center", "y_bottom", "inv_w", "inv_h", "inv_sqrt_area", "aspect_ratio", "log_area", "ground_dist_proxy", "d_optics_h", "d_optics_w"
     ]
 
     return {
@@ -101,8 +97,8 @@ def prepare_dataset(dataframe: pd.DataFrame, test_size: float = 0.2, random_stat
         "y_test": y_test,
         "feature_columns": feature_columns,
         "scaler": scaler,
+        "ohe": ohe,
     }
-
 
 
 def train_model(csv_path: str | Path, model_path: str | Path = "distance_model.pth", epochs: int = 200, batch_size: int = 8) -> None:
@@ -117,14 +113,15 @@ def train_model(csv_path: str | Path, model_path: str | Path = "distance_model.p
     y_train = prepared["y_train"]
     y_test = prepared["y_test"]
 
-    # Sample weighting to penalize far distance errors (weights ~ distance^1.5)
-    sample_weights = (y_train / 1.0) ** 1.5
+    rf = RandomForestRegressor(n_estimators=300, max_depth=8, min_samples_leaf=2, random_state=42)
+    et = ExtraTreesRegressor(n_estimators=300, max_depth=10, min_samples_leaf=2, random_state=42)
+    gbr = HistGradientBoostingRegressor(max_depth=6, min_samples_leaf=5, random_state=42)
+    ensemble = VotingRegressor([("rf", rf), ("et", et), ("gbr", gbr)])
 
-    from sklearn.ensemble import HistGradientBoostingRegressor
-    gbr = HistGradientBoostingRegressor(max_depth=4, random_state=42)
-    gbr.fit(X_train, np.log(y_train), sample_weight=sample_weights)
+    sample_weights = (y_train / 1.0) ** 1.2
+    ensemble.fit(X_train, np.log(y_train), sample_weight=sample_weights)
 
-    pred_log = gbr.predict(X_test)
+    pred_log = ensemble.predict(X_test)
     pred_meters = np.exp(pred_log)
 
     errors = np.abs(pred_meters - y_test)
@@ -142,8 +139,9 @@ def train_model(csv_path: str | Path, model_path: str | Path = "distance_model.p
     print(f"Accuracy (predictions within +/- 0.4m): {accuracy_within_0_4m:.2f}%")
 
     checkpoint = {
-        "gbr_model": gbr,
+        "gbr_model": ensemble,
         "scaler": prepared["scaler"],
+        "ohe": prepared["ohe"],
         "feature_columns": prepared["feature_columns"],
         "input_dim": X_train.shape[1],
         "predict_log_target": True,
@@ -169,5 +167,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { MapPin } from 'lucide-react'
 import Footer from '../components/Footer.jsx'
 import Header from '../components/Header.jsx'
-import { detectObjects } from '../services/authService.js'
+import { detectObjects, stopDetectionApi } from '../services/authService.js'
 import styles from './Home.module.css'
 
 function Home() {
@@ -64,6 +64,9 @@ function Home() {
   }, [isDetecting])
 
   const toggleDetection = () => {
+    if (isDetecting) {
+      stopDetectionApi()
+    }
     setIsDetecting((prev) => !prev)
     setStatus(isDetecting ? 'Stopped detection.' : 'Listening for objects.')
   }

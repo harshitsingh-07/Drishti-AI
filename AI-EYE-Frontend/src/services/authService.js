@@ -87,3 +87,12 @@ export async function detectObjects(imageBase64) {
   const response = await axios.post(`${API_BASE_URL}/detect`, { image: imageBase64 })
   return response.data
 }
+
+export async function stopDetectionApi() {
+  try {
+    const response = await axios.post(`${API_BASE_URL}/stop`)
+    return response.data
+  } catch (error) {
+    return null
+  }
+}
