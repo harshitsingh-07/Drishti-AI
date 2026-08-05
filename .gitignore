@@ -20,6 +20,7 @@ yolov8n.pt
 temp_dataset_test/
 merged_dataset/
 synthetic_*/
+benchmark_yolo/
 
 # Editor
 .vscode/
