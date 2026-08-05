@@ -5,6 +5,27 @@ import Header from '../components/Header.jsx'
 import { detectObjects } from '../services/authService.js'
 import styles from './Home.module.css'
 
+function speakNavigationMessage(message) {
+  if (!message) {
+    return;
+  }
+
+  if (!("speechSynthesis" in window)) {
+    console.warn("Speech synthesis is not supported.");
+    return;
+  }
+
+  window.speechSynthesis.cancel();
+
+  const speech = new SpeechSynthesisUtterance(message);
+  speech.lang = "en-IN";
+  speech.rate = 1;
+  speech.pitch = 1;
+  speech.volume = 1;
+
+  window.speechSynthesis.speak(speech);
+}
+
 function Home() {
   const videoRef = useRef(null)
   const [isDetecting, setIsDetecting] = useState(false)
@@ -33,15 +54,26 @@ function Home() {
       startCamera()
       intervalId = window.setInterval(async () => {
         if (!videoRef.current) return
+        
+        const videoElement = videoRef.current
         const canvas = document.createElement('canvas')
-        canvas.width = videoRef.current.videoWidth || 320
-        canvas.height = videoRef.current.videoHeight || 240
+        const targetWidth = 640;
+        const aspectRatio = videoElement.videoHeight / (videoElement.videoWidth || 1);
+        
+        canvas.width = targetWidth;
+        canvas.height = Math.round(targetWidth * aspectRatio);
+        
         const context = canvas.getContext('2d')
-        context.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height)
-        const imageBase64 = canvas.toDataURL('image/jpeg', 0.8)
+        context.drawImage(videoElement, 0, 0, canvas.width, canvas.height)
+        const imageBase64 = canvas.toDataURL('image/jpeg', 0.7)
         try {
           const response = await detectObjects(imageBase64)
           setResult(response)
+          
+          if (response?.narration) {
+            speakNavigationMessage(response.narration);
+          }
+          
           if (response?.detections?.length) {
             const topDetection = response.detections[0]
             setStatus(`Detected ${topDetection.label} at ${topDetection.distance}`)
@@ -52,7 +84,7 @@ function Home() {
         } catch (err) {
           setError('Detection request failed.')
         }
-      }, 2000)
+      }, 1500)
     }
 
     return () => {

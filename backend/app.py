@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 import os
 import sqlite3
@@ -11,19 +11,12 @@ import time
 from typing import Dict, List, Optional
 from queue import Queue, Empty
 import numpy as np
-import ollama
-import pyttsx3
 import concurrent.futures
 from PIL import Image
 from ultralytics import YOLO
 
-try:
-    import win32com.client as _wincl
-    _WINCL = True
-except Exception:
-    _WINCL = False
-
-app = Flask(__name__)
+FRONTEND_DIR = os.path.abspath(os.path.join(ROOT_DIR, "frontend-dist"))
+app = Flask(__name__, static_folder=FRONTEND_DIR, static_url_path="")
 CORS(app)
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -31,7 +24,7 @@ if ROOT_DIR not in sys.path:
     sys.path.append(ROOT_DIR)
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "users.db")
-MODEL_PATH = os.path.abspath(os.path.join(ROOT_DIR, "yolov8s.pt"))
+MODEL_PATH = os.path.abspath(os.path.join(ROOT_DIR, "yolov8n.pt"))
 DISTANCE_MODEL_PATH = os.path.abspath(os.path.join(ROOT_DIR, "distance_model.pth"))
 
 try:
@@ -71,176 +64,46 @@ except Exception as exc:
 EMA_HISTORY: Dict[str, float] = {}
 
 
-class Speaker:
-    def __init__(self, rate: int = 160):
-        self.rate = rate
+def create_navigation_message(detections, frame_width):
+    if not detections:
+        return "No important obstacle detected."
 
-    def say(self, text: str) -> bool:
-        return self._sapi(text) or self._powershell(text) or self._pyttsx3(text)
-
-    def _sapi(self, text: str) -> bool:
-        if not _WINCL:
-            return False
+    def extract_distance(item):
+        val = item.get("distance", "999")
+        if isinstance(val, str):
+            val = val.replace(' m', '').replace('m', '')
         try:
-            voice = _wincl.Dispatch("SAPI.SpVoice")
-            voice.Speak(text)
-            return True
-        except Exception:
-            return False
+            return float(val)
+        except ValueError:
+            return 999.0
 
-    def _powershell(self, text: str) -> bool:
-        script = (
-            "[System.Reflection.Assembly]::LoadWithPartialName('System.Speech') | Out-Null;"
-            " $s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
-            f' $s.Speak("{text}")'
-        )
-        try:
-            subprocess.run(
-                ["powershell", "-Command", script],
-                capture_output=True,
-                timeout=10,
-            )
-            return True
-        except Exception:
-            return False
+    nearest = min(detections, key=extract_distance)
 
-    def _pyttsx3(self, text: str) -> bool:
-        try:
-            engine = pyttsx3.init("sapi5")
-            engine.setProperty("rate", self.rate)
-            voices = engine.getProperty("voices")
-            if voices:
-                engine.setProperty("voice", voices[0].id)
-            engine.say(text)
-            engine.runAndWait()
-            return True
-        except Exception:
-            return False
+    label = nearest.get("label", "object")
+    distance = extract_distance(nearest)
 
+    bbox = nearest.get("bbox", {})
+    center_x = bbox.get("x", frame_width / 2) + bbox.get("width", 0) / 2
+    relative_position = center_x / max(frame_width, 1)
 
-class SpeechThread(threading.Thread):
-    def __init__(self, queue: Queue, stop: threading.Event, rate: int):
-        super().__init__(name="SpeechThread", daemon=True)
-        self.queue = queue
-        self.stop = stop
-        self.speaker = Speaker(rate)
+    if relative_position < 0.33:
+        position = "on your left"
+    elif relative_position > 0.66:
+        position = "on your right"
+    else:
+        position = "ahead"
 
-    def run(self):
-        while not self.stop.is_set():
-            try:
-                text = self.queue.get(timeout=0.5)
-                if text is None:
-                    break
-                success = self.speaker.say(text)
-                print(f"[voice] {'✓' if success else '✗'} {text}")
-            except Empty:
-                continue
-            except Exception as err:
-                print(f"[voice] error: {err}")
-                break
+    if distance <= 1:
+        warning = "Warning. "
+    elif distance <= 2:
+        warning = "Caution. "
+    else:
+        warning = ""
 
-
-class Narrator:
-    def __init__(self, model: str = "qwen2.5:0.5b", timeout: float = 3.0, max_tokens: int = 25):
-        self.model = model
-        self.timeout = timeout
-        self.max_tokens = max_tokens
-
-    def describe(self, detections: List[Dict], frame_w: int) -> Optional[str]:
-        if not detections:
-            return None
-
-        facts = []
-        for det in detections[:3]:
-            label = det.get("label", "object")
-            dist = det.get("distance", "unknown")
-            bbox = det.get("bbox", {})
-            center_x = bbox.get("x", 0) + bbox.get("width", 0) / 2
-            
-            if center_x < frame_w * 0.40:
-                side = "left"
-            elif center_x > frame_w * 0.60:
-                side = "right"
-            else:
-                side = "center"
-            
-            facts.append(f"{label}, {dist}, on the {side}")
-
-        if not facts:
-            return None
-
-        prompt = (
-            "You are a voice guide. Make a single, short sentence from the facts below. "
-            "Address the user directly using 'your left', 'your right', or 'straight ahead'. "
-            "Do NOT add ANY extra details, environments (like streets or buildings), or guess relationships.\n\n"
-            "Example Scene:\nperson, 1.2 m, on the left\n"
-            "Example Sentence: You have a person on your left at 1.2 meters.\n\n"
-            "Scene:\n" + "\n".join(facts) + "\n\nSentence:"
-        )
-
-        try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(
-                    ollama.chat,
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    options={"num_predict": self.max_tokens, "temperature": 0.3},
-                )
-                response = future.result(timeout=self.timeout)
-
-            # ollama <= 0.1.x compatibility vs ollama dict response
-            if isinstance(response, dict):
-                text = response.get("message", {}).get("content", "")
-            else:
-                text = getattr(getattr(response, "message", None), "content", None)
-                
-            return text.strip() if text else None
-        except concurrent.futures.TimeoutError:
-            print(f"[llm] timed out after {self.timeout}s")
-            return None
-        except Exception as err:
-            print(f"[llm] error: {err}")
-            return None
-
-LLM_NARRATOR = Narrator()
-
-class VoiceAssistant:
-    def __init__(self) -> None:
-        self.speech_queue = Queue()
-        self.stop_event = threading.Event()
-        self.worker_thread = SpeechThread(self.speech_queue, self.stop_event, 160)
-        self.worker_thread.start()
-
-    def speak(self, text: str) -> None:
-        if not text:
-            return
-        self.speech_queue.put(text)
-
-    def generate_narration(self, detections: List[Dict], frame_width: int = 640) -> str:
-        if not detections:
-            return "No object detected"
-        top = detections[0]
-        
-        position_text = ""
-        if "bbox" in top:
-            bbox = top["bbox"]
-            center_x = bbox["x"] + bbox["width"] / 2
-            if center_x < frame_width * 0.40:
-                position_text = " on the left"
-            elif center_x > frame_width * 0.60:
-                position_text = " on the right"
-            else:
-                position_text = " in the center"
-                
-        fallback = f"{top['label']} at about {top['distance']}{position_text}"
-        
-        dynamic = LLM_NARRATOR.describe(detections, frame_width)
-        if dynamic:
-            return dynamic
-        return fallback
-
-
-VOICE_ASSISTANT = VoiceAssistant()
+    return (
+        f"{warning}{label} {position}, "
+        f"approximately {distance} metres away."
+    )
 
 class AnnouncementTracker:
     def __init__(self, cooldown: float = 3.0, distance_threshold: float = 0.4):
@@ -549,7 +412,13 @@ def detect():
                 "detections": [],
             }), 500
 
-        results = MODEL(image, stream=False, conf=0.45, iou=0.45)
+        results = MODEL.predict(
+            source=image,
+            imgsz=416,
+            conf=0.45,
+            device="cpu",
+            verbose=False
+        )
         detections = []
         if results and getattr(results[0], 'boxes', None) is not None:
             for box in results[0].boxes:
@@ -576,7 +445,7 @@ def detect():
 
         if stable_detections:
             best_det = stable_detections[0]
-            narration = VOICE_ASSISTANT.generate_narration(stable_detections, width)
+            narration = create_navigation_message(stable_detections, width)
             bbox = best_det.get("bbox", {})
             center_x = bbox.get("x", 0) + bbox.get("width", 0) / 2
             if center_x < width * 0.40:
@@ -589,8 +458,7 @@ def detect():
             should_speak = ANNOUNCEMENT_TRACKER.should_announce(best_det["label"], best_det["distance"], side)
             if should_speak:
                 ANNOUNCEMENT_TRACKER.mark_announced(best_det["label"], best_det["distance"], side)
-                print(f"[Detect] Speaking: {narration}")
-                VOICE_ASSISTANT.speak(narration)
+                print(f"[Detect] Narration generated: {narration}")
             else:
                 print(f"[Detect] Suppressed speech for {best_det['label']} at {best_det['distance']}")
         else:
@@ -644,5 +512,19 @@ def clear_detections():
     return jsonify({"message": "All detection results cleared."})
 
 
+@app.route("/", defaults={"path": ""})
+@app.route("/<path:path>")
+def serve_frontend(path):
+    requested_file = os.path.join(FRONTEND_DIR, path)
+
+    if path and os.path.isfile(requested_file):
+        return send_from_directory(FRONTEND_DIR, path)
+
+    return send_from_directory(
+        FRONTEND_DIR,
+        "index.html"
+    )
+
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    port = int(os.environ.get("PORT", "7860"))
+    app.run(host="0.0.0.0", port=port, debug=False)

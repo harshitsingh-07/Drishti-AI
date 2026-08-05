@@ -69,7 +69,10 @@ function Login() {
               <Loader label="Signing in" />
             </div>
           ) : (
-            <Button type="submit">Sign in</Button>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <Button type="submit">Sign in</Button>
+              <Button type="button" variant="secondary" onClick={() => navigate('/home')}>Continue as Guest</Button>
+            </div>
           )}
         </form>
 

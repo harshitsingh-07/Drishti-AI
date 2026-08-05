@@ -1,6 +1,16 @@
-# AI Eye 👁️
+---
+title: DrishtiAI
+emoji: 👁️
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
 
-Real-time object detection with **human-like voice guidance**, built for visually impaired users.  
+# DrishtiAI
+
+DrishtiAI is an intelligent navigation-assistance system for visually impaired users. It uses YOLOv8 object detection, distance estimation and voice guidance.
 Points a webcam at the world and speaks natural sentences like:
 
 > *"A person is approaching on your right side, about 1.2 metres away."*
