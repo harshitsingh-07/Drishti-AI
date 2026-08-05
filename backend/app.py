@@ -216,6 +216,13 @@ class VoiceAssistant:
             return
         self.speech_queue.put(text)
 
+    def clear(self) -> None:
+        while not self.speech_queue.empty():
+            try:
+                self.speech_queue.get_nowait()
+            except Exception:
+                break
+
     def generate_narration(self, detections: List[Dict], frame_width: int = 640) -> str:
         if not detections:
             return "No object detected"
@@ -286,7 +293,7 @@ ANNOUNCEMENT_TRACKER = AnnouncementTracker()
 
 
 class DetectionStabilizer:
-    def __init__(self, min_frames: int = 2, stale_timeout: float = 1.2):
+    def __init__(self, min_frames: int = 1, stale_timeout: float = 1.2):
         self.min_frames = min_frames
         self.stale_timeout = stale_timeout
         self.last_good_detections: List[Dict] = []
@@ -549,12 +556,12 @@ def detect():
                 "detections": [],
             }), 500
 
-        results = MODEL(image, stream=False, conf=0.45, iou=0.45)
+        results = MODEL(image, stream=False, conf=0.35, iou=0.45)
         detections = []
         if results and getattr(results[0], 'boxes', None) is not None:
             for box in results[0].boxes:
                 confidence = float(box.conf[0])
-                if confidence < 0.45:
+                if confidence < 0.35:
                     continue
                 class_id = int(box.cls[0])
                 class_name = MODEL.names.get(class_id, 'object')
@@ -625,6 +632,13 @@ def detect():
         })
     except Exception as exc:
         return jsonify({"message": f"Detection failed: {exc}"}), 500
+
+
+@app.route('/api/stop', methods=['POST'])
+def stop_speech():
+    VOICE_ASSISTANT.clear()
+    ANNOUNCEMENT_TRACKER.clear_active()
+    return jsonify({"message": "Speech stopped and reset."})
 
 
 @app.route('/api/detections', methods=['GET'])
