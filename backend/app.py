@@ -33,6 +33,16 @@ if ROOT_DIR not in sys.path:
 DB_PATH = os.path.join(os.path.dirname(__file__), "users.db")
 MODEL_PATH = os.path.abspath(os.path.join(ROOT_DIR, "yolov8s.pt"))
 DISTANCE_MODEL_PATH = os.path.abspath(os.path.join(ROOT_DIR, "distance_model.pth"))
+ANNOUNCE_CONFIDENCE_THRESHOLD = 0.45
+
+NAVIGATION_OBSTACLES = {
+    'person', 'bicycle', 'car', 'motorcycle', 'bus', 'train', 'truck', 
+    'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 
+    'cat', 'dog', 'horse', 'cow', 'backpack', 'umbrella', 'handbag', 'suitcase', 
+    'chair', 'couch', 'potted plant', 'bed', 'dining table', 
+    'tv', 'laptop', 'microwave', 'oven', 'refrigerator',
+}
+
 
 try:
     MODEL = YOLO(MODEL_PATH)
@@ -141,7 +151,7 @@ class SpeechThread(threading.Thread):
 
 
 class Narrator:
-    def __init__(self, model: str = "qwen2.5:0.5b", timeout: float = 3.0, max_tokens: int = 25):
+    def __init__(self, model: str = "llama3.2:1b", timeout: float = 3.0, max_tokens: int = 25):
         self.model = model
         self.timeout = timeout
         self.max_tokens = max_tokens
@@ -158,23 +168,23 @@ class Narrator:
             center_x = bbox.get("x", 0) + bbox.get("width", 0) / 2
             
             if center_x < frame_w * 0.40:
-                side = "left"
+                side = "on your left"
             elif center_x > frame_w * 0.60:
-                side = "right"
+                side = "on your right"
             else:
-                side = "center"
+                side = "straight ahead"
             
-            facts.append(f"{label}, {dist}, on the {side}")
+            facts.append(f"{label}, {dist}, {side}")
 
         if not facts:
             return None
 
         prompt = (
-            "You are a voice guide. Make a single, short sentence from the facts below. "
-            "Address the user directly using 'your left', 'your right', or 'straight ahead'. "
-            "Do NOT add ANY extra details, environments (like streets or buildings), or guess relationships.\n\n"
-            "Example Scene:\nperson, 1.2 m, on the left\n"
-            "Example Sentence: You have a person on your left at 1.2 meters.\n\n"
+            "You are a concise navigation assistant for a blind person.\n"
+            "Reply with exactly one short sentence based ONLY on the scene facts.\n"
+            "Do NOT add any extra directions, words, or greetings.\n"
+            "Use the exact direction provided in the facts.\n"
+            "Format: '[Object] is [Distance] away [Direction].'\n\n"
             "Scene:\n" + "\n".join(facts) + "\n\nSentence:"
         )
 
@@ -233,24 +243,24 @@ class VoiceAssistant:
             bbox = top["bbox"]
             center_x = bbox["x"] + bbox["width"] / 2
             if center_x < frame_width * 0.40:
-                position_text = " on the left"
+                position_text = " on your left"
             elif center_x > frame_width * 0.60:
-                position_text = " on the right"
+                position_text = " on your right"
             else:
-                position_text = " in the center"
+                position_text = " straight ahead"
                 
-        fallback = f"{top['label']} at about {top['distance']}{position_text}"
+        fallback = f"{str(top['label']).title()} is {top['distance']} away{position_text}."
         
-        dynamic = LLM_NARRATOR.describe(detections, frame_width)
-        if dynamic:
-            return dynamic
+        # dynamic = LLM_NARRATOR.describe(detections, frame_width)
+        # if dynamic:
+        #     return dynamic
         return fallback
 
 
 VOICE_ASSISTANT = VoiceAssistant()
 
 class AnnouncementTracker:
-    def __init__(self, cooldown: float = 3.0, distance_threshold: float = 0.4):
+    def __init__(self, cooldown: float = 4.0, distance_threshold: float = 0.8):
         self.cooldown = cooldown
         self.distance_threshold = distance_threshold
         self._log: Dict[str, dict] = {}
@@ -293,7 +303,7 @@ ANNOUNCEMENT_TRACKER = AnnouncementTracker()
 
 
 class DetectionStabilizer:
-    def __init__(self, min_frames: int = 1, stale_timeout: float = 1.2):
+    def __init__(self, min_frames: int = 4, stale_timeout: float = 1.2):
         self.min_frames = min_frames
         self.stale_timeout = stale_timeout
         self.last_good_detections: List[Dict] = []
@@ -450,6 +460,23 @@ def init_db():
 init_db()
 
 
+def ensure_llm_model(model_name: str):
+    try:
+        print(f"[Setup] Checking if {model_name} is available in Ollama...")
+        res = subprocess.run(["ollama", "list"], capture_output=True, text=True, check=False)
+        if model_name not in res.stdout:
+            print(f"[Setup] {model_name} not found. Downloading automatically... (this may take a few minutes)")
+            # Using subprocess so the user can see the progress in the terminal if they run app.py manually
+            subprocess.run(["ollama", "pull", model_name], check=True)
+            print("[Setup] LLM Download complete!")
+        else:
+            print(f"[Setup] {model_name} is ready.")
+    except Exception as e:
+        print(f"[Setup Error] Could not check or pull the LLM model automatically. Please ensure Ollama is installed and running. Error: {e}")
+
+ensure_llm_model("llama3.2:1b")
+
+
 @app.route('/api/health', methods=['GET'])
 def health():
     return jsonify({"status": "ok", "message": "AI Eye backend is running"})
@@ -556,15 +583,17 @@ def detect():
                 "detections": [],
             }), 500
 
-        results = MODEL(image, stream=False, conf=0.35, iou=0.45)
+        results = MODEL(image, stream=False, conf=ANNOUNCE_CONFIDENCE_THRESHOLD, iou=0.45)
         detections = []
         if results and getattr(results[0], 'boxes', None) is not None:
             for box in results[0].boxes:
                 confidence = float(box.conf[0])
-                if confidence < 0.35:
+                if confidence < ANNOUNCE_CONFIDENCE_THRESHOLD:
                     continue
                 class_id = int(box.cls[0])
                 class_name = MODEL.names.get(class_id, 'object')
+                if class_name not in NAVIGATION_OBSTACLES:
+                    continue
                 x_center, y_center, box_width, box_height = box.xywh[0].tolist()
                 bbox = {
                     "x": int(x_center - box_width / 2),
@@ -593,13 +622,16 @@ def detect():
             else:
                 side = "center"
 
-            should_speak = ANNOUNCEMENT_TRACKER.should_announce(best_det["label"], best_det["distance"], side)
+            should_speak = (
+                best_det.get("confidence", 0.0) >= ANNOUNCE_CONFIDENCE_THRESHOLD
+                and ANNOUNCEMENT_TRACKER.should_announce(best_det["label"], best_det["distance"], side)
+            )
             if should_speak:
                 ANNOUNCEMENT_TRACKER.mark_announced(best_det["label"], best_det["distance"], side)
                 print(f"[Detect] Speaking: {narration}")
                 VOICE_ASSISTANT.speak(narration)
             else:
-                print(f"[Detect] Suppressed speech for {best_det['label']} at {best_det['distance']}")
+                print(f"[Detect] Suppressed speech for {best_det['label']} at {best_det['distance']} confidence={best_det.get('confidence', 0.0)}")
         else:
             narration = "No object detected"
             ANNOUNCEMENT_TRACKER.clear_active()

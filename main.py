@@ -1,20 +1,4 @@
-"""
-AI Eye — real-time object detection with voice guidance
-Designed to help visually impaired users navigate their surroundings.
 
-How it works:
-  1. Captures video from a webcam.
-  2. Runs YOLOv8 on each frame to detect objects.
-  3. Stabilizes detections across a few frames so random flickers don't trigger speech.
-  4. Sends confirmed detections to a small local LLM (via Ollama) that writes a
-     natural spoken sentence, e.g. "A person is approaching on your right side."
-  5. Speaks the sentence aloud through Windows TTS.
-  6. Falls back to a plain template sentence if the LLM is too slow or unavailable.
-
-Requirements:
-  pip install ultralytics opencv-python ollama pyttsx3 pywin32
-  Ollama installed with:  ollama pull qwen2.5:0.5b
-"""
 
 import os
 import time
@@ -396,11 +380,10 @@ class Narrator:
             return None
 
         prompt = (
-            "You are a voice guide. Make a single, short sentence from the facts below. "
-            "Address the user directly using 'your left', 'your right', or 'straight ahead'. "
-            "Do NOT add ANY extra details, environments (like streets or buildings), or guess relationships.\n\n"
-            "Example Scene:\nperson, 1.2 m, on the left\n"
-            "Example Sentence: You have a person on your left at 1.2 meters.\n\n"
+            "You are a navigation assistant for a blind person. "
+            "Return exactly one sentence, max 10 words. "
+            "Use only object label, distance, and direction. "
+            "Do NOT mention height, size, shape, dimensions or tall.\n\n"
             "Scene:\n" + "\n".join(facts) + "\n\nSentence:"
         )
 

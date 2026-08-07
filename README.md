@@ -1,128 +1,91 @@
-# AI Eye 👁️
+# 👁️ Drishti-AI: A Vision for the Visually Impaired
 
-Real-time object detection with **human-like voice guidance**, built for visually impaired users.  
-Points a webcam at the world and speaks natural sentences like:
+**Drishti-AI** (formerly AI-Eye) is an intelligent, real-time navigation assistant built to empower visually impaired individuals. By turning a simple camera feed into a descriptive voice, it helps users safely navigate their environment. 
 
-> *"A person is approaching on your right side, about 1.2 metres away."*
+Imagine walking into a room and having a personal assistant instantly whisper in your ear: *"Person is 1.5 meters away straight ahead"* or *"Chair is 2 meters away on your left."* That is exactly what Drishti-AI does.
 
 ---
 
-## 📋 Requirements
+## 🚀 How It Works (The Magic Behind the Scenes)
 
-### System requirements
-| What | Why |
-|---|---|
-| Windows 10 / 11 | TTS uses Windows SAPI |
-| Python 3.10+ | type hints syntax used throughout |
-| Webcam | video input for detection |
-| ~2 GB free RAM | YOLO + LLM loaded together |
+When a user turns on the camera, the system performs the following steps in a fraction of a second:
+1. **Sees the World**: Captures the live video feed using the React Frontend.
+2. **Detects Obstacles**: Sends the video frames to a Flask Backend where an advanced AI model (**YOLOv8**) instantly recognizes objects (people, cars, furniture, etc.).
+3. **Calculates Distance & Direction**: A custom Machine Learning model calculates exactly how far the object is (in meters) and figures out if it's on the left, right, or straight ahead.
+4. **Speaks to the User**: Using an intelligent Text-to-Speech system running in the background, it verbally warns the user about the obstacle without ever freezing or slowing down the video feed.
 
-### Python packages
-Install everything with one command:
+---
+
+## ✨ Key Features
+
+- **⚡ Real-Time Object Detection**: Uses **YOLOv8** for lightning-fast detection of everyday obstacles.
+- **📏 Distance Estimation**: Custom-trained AI predicts the physical distance (in meters) to objects.
+- **🧭 Directional Awareness**: Tells the user exactly where the object is (Left, Right, or Center).
+- **🗣️ Smart Audio Navigation**: Uses a stable `AnnouncementTracker` so the AI doesn't annoy the user by repeating itself. It only speaks when objects move significantly or new obstacles appear.
+- **🤖 LLM Integration (Ollama)**: Capable of generating natural, human-like sentences using large language models.
+- **🔐 Secure User Authentication**: Users can create profiles, save emergency contacts, and personalize their experience.
+
+---
+
+## 🛠️ Technology Stack
+
+- **Frontend**: React.js, Vite, Vanilla CSS
+- **Backend**: Python, Flask, SQLite (Database)
+- **Computer Vision**: OpenCV (`cv2`), YOLOv8 (Ultralytics)
+- **Machine Learning**: PyTorch, Scikit-Learn
+- **Text-to-Speech**: pyttsx3, Windows SAPI, PowerShell Fallbacks
+
+---
+
+## 💻 Exact Commands to Start the Project
+
+To run this project on your local machine, follow these simple step-by-step commands. You will need to open **two separate terminal windows**.
+
+### Prerequisites
+Make sure you have installed:
+- **Node.js** (v16+)
+- **Python** (v3.9+)
+- **Ollama** (Download from [ollama.com](https://ollama.com/) if you want to use the LLM features)
+
+---
+
+### Step 1: Start the Backend (Terminal 1)
+Open your first terminal, navigate to the main `Drishti-AI` folder, and run these commands:
+
 ```bash
+# 1. Go into the backend folder
+cd backend
+
+# 2. Install all the required Python libraries (Only needed the first time)
 pip install -r requirements.txt
+
+# 3. Start the Flask AI Server
+python app.py
 ```
-
-What gets installed:
-
-| Package | Used for |
-|---|---|
-| `ultralytics` | YOLOv8 real-time object detection |
-| `opencv-python` | webcam capture, drawing bounding boxes |
-| `ollama` | Python client for the local LLM server |
-| `pyttsx3` | text-to-speech fallback |
-| `pywin32` | Windows SAPI voice engine (primary) |
-| `torch` | neural network for distance regression model |
-| `pandas` | reading/writing training CSV files |
-| `scikit-learn` | train/test split, feature scaling |
-| `Pillow` | generating synthetic training images |
-
-### Ollama (local LLM server)
-
-> ⚠️ **This is NOT a Python package — it must be installed separately.**
-
-**Option A** — Use the installer already in this repo:
-```
-OllamaSetup.exe
-```
-
-**Option B** — Download from the official site:  
-👉 https://ollama.com/download
-
-After installing, pull the model (one-time, ~400 MB):
-```bash
-ollama pull qwen2.5:0.5b
-```
-
-> **No GPU? No problem.** `qwen2.5:0.5b` runs fine on CPU.  
-> If Ollama is missing or slow, the app automatically falls back to plain template messages — it still works.
+*(Leave this terminal running. You should see a message saying the Flask server is running on port 5000.)*
 
 ---
 
-## ▶️ Quick start — one command does everything
+### Step 2: Start the Frontend (Terminal 2)
+Open a **new** second terminal, navigate to the main `Drishti-AI` folder, and run these commands:
 
 ```bash
-# 1. Clone the repo
-git clone <your-repo-url>
-cd AI-Eye
+# 1. Go into the frontend folder
+cd AI-EYE-Frontend
 
-# 2. Run the setup script — installs packages, Ollama, and the AI model automatically
-python setup.py
+# 2. Install the Node packages (Only needed the first time)
+npm install
 
-# 3. Start the app
-python main.py
+# 3. Start the React development server
+npm run dev
 ```
 
-Press **Q** in the video window to quit.
-
-> `setup.py` will:
-> - Install all Python packages via pip
-> - Run `OllamaSetup.exe` (already included in the repo) if Ollama isn't installed
-> - Download the `qwen2.5:0.5b` language model automatically
+### Step 3: Open the App
+- Once both terminals are running, open your web browser.
+- Go to the URL provided by the frontend terminal (usually `http://localhost:5173`).
+- **Register/Login**, allow camera permissions, and the AI will start guiding you!
 
 ---
 
-## 📁 Project files
-
-| File | Purpose |
-|---|---|
-| `main.py` | **Main app** — run this to start AI Eye |
-| `ai_eye.py` | Older version kept as reference |
-| `extract_bounding_boxes.py` | Build a training CSV from labelled photos |
-| `generate_synthetic_dataset.py` | Generate synthetic images for training |
-| `train_distance_model.py` | Train the distance regression neural network |
-| `dataset_utils.py` | Shared filename parsing helpers |
-| `distance_model.pth` | Pre-trained distance model weights |
-| `requirements.txt` | All Python dependencies |
-| `OllamaSetup.exe` | Ollama installer for Windows |
-
----
-
-## 🔧 Training your own distance model (optional)
-
-The current distance estimation is a simple heuristic (bounding box size → distance).  
-You can replace it with a trained neural network using your own photos:
-
-```bash
-# Step 1 — take photos named like:  chair_1m_01.jpg  person_2.5m_03.jpg
-# Step 2 — extract features
-python extract_bounding_boxes.py --input-dir ./my_photos --output-csv dataset.csv
-
-# Step 3 — train the model
-python train_distance_model.py --csv dataset.csv --model-output distance_model.pth
-```
-
-Or generate synthetic data to experiment:
-```bash
-python generate_synthetic_dataset.py --output-dir ./synthetic
-python extract_bounding_boxes.py --input-dir ./synthetic --output-csv synthetic.csv
-python train_distance_model.py --csv synthetic.csv
-```
-
----
-
-## 💡 Tips
-
-- **Slow speech?** The LLM runs locally — first announcement may take a second or two. Subsequent ones are faster after warmup.
-- **No speech at all?** Make sure `pywin32` is installed and you are on Windows.
-- **Model not found?** `yolov8n.pt` downloads automatically (~6 MB) on first run.
+## 📄 License
+This project is open-source and created to make the world a more accessible place.
