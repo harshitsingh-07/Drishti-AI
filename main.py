@@ -13,6 +13,40 @@ import cv2
 import ollama
 from ultralytics import YOLO
 
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+@dataclass
+class Config:
+    """Configuration settings for AI Eye"""
+    MODEL_PATH: str = "yolov8n.pt"
+    CAMERA_INDEX: int = 0
+    
+    # Detection settings
+    CONFIDENCE_THRESHOLD: float = 0.35
+    INFERENCE_INTERVAL: float = 0.1  # 10 FPS inference
+    
+    # Speech settings
+    SPEECH_RATE: int = 160
+    SPEECH_REPEAT_COOLDOWN: float = 2.5  # Seconds before repeating same object
+    DISTANCE_CHANGE_THRESHOLD: float = 0.4  # Meters
+    
+    # Display settings
+    WINDOW_NAME: str = "AI Eye Detection"
+    DISPLAY_FPS: bool = True
+    
+    # Threading
+    SPEECH_THREAD_TIMEOUT: float = 3.0
+    THREAD_INIT_WAIT: float = 1.0
+
+
+# Import optional dependencies
+try:
+    import pyttsx3
+    PYTTSX3_AVAILABLE = True
+except ImportError:
+    PYTTSX3_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Settings — change these to tweak behaviour without touching the rest
