@@ -1,0 +1,57 @@
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@700&display=swap');
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+:root {
+  --color-bg: #14181c;
+  --color-surface: #1e252b;
+  --color-surface-raised: #242c33;
+  --color-border: #2a333a;
+  --color-accent: #f2994a;
+  --color-accent-2: #2aa9a0;
+  --color-danger: #e5644f;
+  --color-text-primary: #f5f1ea;
+  --color-text-secondary: #9aa5ac;
+  --color-text-muted: #6b747c;
+  --font-heading: 'Manrope', system-ui, sans-serif;
+  --font-body: system-ui, sans-serif;
+  --radius-card: 14px;
+  --radius-control: 10px;
+}
+
+html, body, #root {
+  margin: 0;
+}
+
+body {
+  min-height: 100%;
+  background-color: #14181c;
+  color: #f5f1ea;
+  font-family: system-ui, sans-serif;
+  line-height: 1.5;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-heading);
+  font-weight: 700;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid #2aa9a0;
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

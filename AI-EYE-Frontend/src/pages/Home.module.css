@@ -1,0 +1,154 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background-color: var(--color-bg);
+}
+
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  padding: 32px 24px;
+}
+
+.status {
+  margin: 0;
+  font-size: 1rem;
+  color: var(--color-text-secondary);
+  text-align: center;
+  line-height: 1.5;
+}
+
+.videoCard {
+  width: min(100%, 960px);
+  border: 1px solid var(--color-border);
+  border-radius: 20px;
+  overflow: hidden;
+  background-color: #000;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+}
+
+.video {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 420px;
+  aspect-ratio: 16 / 9;
+  background: #000;
+}
+
+.startButtonWrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 140px;
+  height: 140px;
+}
+
+.pulseRing {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid #f2994a;
+  animation: pulse 2s ease-out infinite;
+  pointer-events: none;
+}
+
+.pulseRingDelay {
+  animation-delay: 1s;
+}
+
+@keyframes pulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.6;
+  }
+
+  100% {
+    transform: scale(1.8);
+    opacity: 0;
+  }
+}
+
+.startButton {
+  position: relative;
+  z-index: 1;
+  width: 140px;
+  height: 140px;
+  border: none;
+  border-radius: 50%;
+  background-color: #f2994a;
+  color: #14181c;
+  font-family: var(--font-heading);
+  font-weight: 700;
+  font-size: 1.25rem;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.startButton:hover {
+  background-color: #e0883a;
+}
+
+.error {
+  margin: 0;
+  color: #ff6b6b;
+  font-weight: 600;
+}
+
+.resultBox {
+  width: min(100%, 640px);
+  padding: 16px 20px;
+  border: 1px solid var(--color-border);
+  border-radius: 16px;
+  background-color: var(--color-surface);
+}
+
+.resultTitle {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+.resultText {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--color-text-secondary);
+}
+
+.locationToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background-color: transparent;
+  color: var(--color-text-secondary);
+  font-family: inherit;
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.25;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.locationToggle:hover:not(.locationToggleActive) {
+  background-color: var(--color-surface);
+}
+
+.locationToggleActive {
+  background-color: #2aa9a0;
+  border-color: #2aa9a0;
+  color: #14181c;
+}
+
+.locationToggleActive:hover {
+  background-color: #249890;
+  border-color: #249890;
+}

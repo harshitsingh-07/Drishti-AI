@@ -1,0 +1,27 @@
+# Ollama installer — too large for GitHub (1.4 GB), downloaded automatically by setup.py
+OllamaSetup.exe
+_OllamaSetup_temp.exe
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# YOLO model weights — downloaded automatically on first run
+# (comment this out if you want to commit your custom trained weights)
+yolov8n.pt
+
+# Datasets and temp files
+temp_dataset_test/
+merged_dataset/
+synthetic_*/
+benchmark_yolo/
+
+# Editor
+.vscode/
+.idea/

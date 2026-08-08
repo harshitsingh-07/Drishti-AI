@@ -1,0 +1,41 @@
+.page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: 24px;
+  background-color: #14181c;
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  max-width: 340px;
+  text-align: center;
+}
+
+.code {
+  margin: 0;
+  font-family: var(--font-heading);
+  font-weight: 700;
+  font-size: clamp(4rem, 18vw, 6rem);
+  line-height: 1;
+  color: var(--color-text-primary);
+  letter-spacing: -0.02em;
+}
+
+.message {
+  margin: 0;
+  font-size: 1rem;
+  color: #9aa5ac;
+  line-height: 1.5;
+}
+
+.buttonWrap {
+  width: 100%;
+  margin-top: 8px;
+}

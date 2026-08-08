@@ -1,0 +1,27 @@
+.button {
+  width: 100%;
+  min-height: 48px;
+  border-radius: 10px;
+  font-weight: 700;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.25;
+  cursor: pointer;
+}
+
+.button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.primary {
+  border: none;
+  background-color: #f2994a;
+  color: #14181c;
+}
+
+.secondary {
+  background-color: transparent;
+  border: 1px solid #2a333a;
+  color: #f5f1ea;
+}

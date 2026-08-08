@@ -1,17 +1,16 @@
-"""
-AI Eye - Real-time object detection with voice feedback
-Optimized for performance and reliability
-"""
 
+
+import os
 import time
 import threading
 import subprocess
-from typing import Dict, Tuple, Optional
+import concurrent.futures
+from dataclasses import dataclass
 from queue import Queue, Empty
-from dataclasses import dataclass, field
-from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 
 import cv2
+import ollama
 from ultralytics import YOLO
 
 # ============================================================================
@@ -49,448 +48,679 @@ try:
 except ImportError:
     PYTTSX3_AVAILABLE = False
 
+# ---------------------------------------------------------------------------
+# Settings — change these to tweak behaviour without touching the rest
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Config:
+    # Camera & model
+    model_path:          str   = "yolov8n.pt"
+    camera_index:        int   = 0
+
+    # Detection
+    confidence:          float = 0.45   # minimum YOLO confidence to keep a box
+    iou_threshold:       float = 0.45   # overlap threshold for NMS
+    inference_fps:       float = 10.0   # how many times per second we run YOLO
+    stable_frames:       int   = 4      # frames an object must appear before we announce it
+
+    # Voice
+    speech_rate:         int   = 160    # words per minute
+    repeat_cooldown:     float = 2.5    # seconds before we'll say the same thing again
+    distance_threshold:  float = 0.4    # metres of change needed to re-announce
+
+    # LLM
+    use_llm:             bool  = True
+    llm_model:           str   = "qwen2.5:0.5b"
+    llm_timeout:         float = 12.0   # seconds to wait for a response
+    llm_max_tokens:      int   = 25
+
+    # UI
+    window_title:        str   = "AI Eye"
+    show_fps:            bool  = True
+
+    # Internal
+    speech_join_timeout: float = 3.0
+    startup_wait:        float = 1.0    # give the speech thread a moment to start up
+
+    @property
+    def inference_interval(self) -> float:
+        return 1.0 / max(self.inference_fps, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Optional libraries — graceful degradation if not installed
+# ---------------------------------------------------------------------------
+
 try:
-    import win32com.client as wincl
-    WINCL_AVAILABLE = True
+    import pyttsx3
+    _PYTTSX3 = True
+except ImportError:
+    _PYTTSX3 = False
+
+try:
+    import win32com.client as _wincl
+    _WINCL = True
 except Exception:
-    WINCL_AVAILABLE = False
-    wincl = None
+    _wincl = None
+    _WINCL = False
 
 
-# ============================================================================
-# SPEECH SYNTHESIS
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Ollama helpers — auto-start the server and pull the model if needed
+# ---------------------------------------------------------------------------
 
-class SpeechSynthesizer:
-    """Handles text-to-speech with multiple fallback methods"""
-    
-    def __init__(self):
-        self.config = Config()
-        self._log("Initializing speech synthesis")
-        self._log(f"Available: pyttsx3={PYTTSX3_AVAILABLE}, SAPI={WINCL_AVAILABLE}")
-    
-    def _log(self, message: str) -> None:
-        """Log with timestamp"""
-        print(f"[Speech] {message}")
-    
-    def speak_windows_sapi(self, text: str) -> bool:
-        """Use Windows SAPI COM interface (most reliable)"""
-        if not WINCL_AVAILABLE:
-            return False
-        try:
-            speaker = wincl.Dispatch("SAPI.SpVoice")
-            speaker.Speak(text)
+_OLLAMA_PATHS = (
+    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Ollama", "ollama.exe"),
+    os.path.join(os.environ.get("ProgramFiles",  ""), "Ollama", "ollama.exe"),
+)
+
+
+def _ollama_running() -> bool:
+    try:
+        ollama.list()
+        return True
+    except Exception:
+        return False
+
+
+def _start_ollama() -> bool:
+    """Try to launch the Ollama server silently in the background."""
+    exe = next((p for p in _OLLAMA_PATHS if p and os.path.isfile(p)), None)
+    if not exe:
+        return False
+    try:
+        subprocess.Popen(
+            [exe, "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        return False
+
+    # Poll for up to 10 seconds
+    for _ in range(20):
+        if _ollama_running():
             return True
-        except Exception as e:
-            self._log(f"SAPI failed: {e}")
+        time.sleep(0.5)
+    return False
+
+
+def ensure_ollama(model: str, log) -> bool:
+    """Make sure Ollama is running and the model is downloaded."""
+    if not _ollama_running():
+        log("Ollama not running — trying to start it automatically...")
+        if not _start_ollama():
+            log("Could not start Ollama. Install it from https://ollama.com and run:")
+            log(f"  ollama pull {model}")
             return False
-    
-    def speak_powershell(self, text: str) -> bool:
-        """Use PowerShell System.Speech (reliable fallback)"""
+        log("Ollama started ✓")
+
+    try:
+        available = {m.model.split(":")[0] for m in ollama.list().models}
+        if model.split(":")[0] not in available:
+            log(f"Downloading model: {model}  (this only happens once)")
+            ollama.pull(model)
+        return True
+    except Exception as err:
+        log(f"Ollama model check failed: {err}")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Text-to-speech — tries three methods in order of reliability
+# ---------------------------------------------------------------------------
+
+class Speaker:
+    """Wraps Windows TTS so the rest of the code doesn't care about the details."""
+
+    def __init__(self, rate: int = 160):
+        self.rate = rate
+
+    def say(self, text: str) -> bool:
+        return (
+            self._sapi(text)
+            or self._powershell(text)
+            or self._pyttsx3(text)
+        )
+
+    def _sapi(self, text: str) -> bool:
+        if not _WINCL:
+            return False
         try:
-            ps_script = f'''
-[System.Reflection.Assembly]::LoadWithPartialName('System.Speech') | Out-Null
-$speak = New-Object System.Speech.Synthesis.SpeechSynthesizer
-$speak.Speak("{text}")
-'''
+            voice = _wincl.Dispatch("SAPI.SpVoice")
+            voice.Speak(text)
+            return True
+        except Exception:
+            return False
+
+    def _powershell(self, text: str) -> bool:
+        script = (
+            "[System.Reflection.Assembly]::LoadWithPartialName('System.Speech') | Out-Null\n"
+            "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer\n"
+            f'$s.Speak("{text}")'
+        )
+        try:
             subprocess.run(
-                ["powershell", "-Command", ps_script],
+                ["powershell", "-Command", script],
                 capture_output=True,
-                timeout=10
+                timeout=10,
             )
             return True
-        except Exception as e:
-            self._log(f"PowerShell failed: {e}")
+        except Exception:
             return False
-    
-    def speak_pyttsx3(self, text: str) -> bool:
-        """Use pyttsx3 library (if available)"""
-        if not PYTTSX3_AVAILABLE:
+
+    def _pyttsx3(self, text: str) -> bool:
+        if not _PYTTSX3:
             return False
         try:
             engine = pyttsx3.init("sapi5")
-            engine.setProperty("rate", self.config.SPEECH_RATE)
+            engine.setProperty("rate", self.rate)
             voices = engine.getProperty("voices")
             if voices:
                 engine.setProperty("voice", voices[0].id)
             engine.say(text)
             engine.runAndWait()
             return True
-        except Exception as e:
-            self._log(f"pyttsx3 failed: {e}")
+        except Exception:
             return False
-    
-    def speak(self, text: str) -> bool:
-        """Speak text using best available method"""
-        # Try methods in priority order
-        if self.speak_windows_sapi(text):
-            return True
-        if self.speak_powershell(text):
-            return True
-        if self.speak_pyttsx3(text):
-            return True
-        return False
 
 
-class SpeechWorker(threading.Thread):
-    """Background thread for non-blocking speech synthesis"""
-    
-    def __init__(self, queue: Queue, stop_event: threading.Event):
-        super().__init__(name="SpeechWorker", daemon=False)
+class SpeechThread(threading.Thread):
+    """Dedicated thread that drains a queue and speaks each item in order."""
+
+    def __init__(self, queue: Queue, stop: threading.Event, rate: int):
+        super().__init__(name="SpeechThread", daemon=False)
         self.queue = queue
-        self.stop_event = stop_event
-        self.synthesizer = SpeechSynthesizer()
-    
-    def run(self) -> None:
-        """Worker thread main loop"""
-        print("[Speech] Worker started")
-        
-        while not self.stop_event.is_set():
+        self.stop = stop
+        self.speaker = Speaker(rate)
+
+    def run(self):
+        print("[voice] ready")
+        while not self.stop.is_set():
             try:
                 text = self.queue.get(timeout=0.5)
-                if text is None:
+                if text is None:   # sentinel — time to quit
                     break
-                
-                # Speak the text
-                if self.synthesizer.speak(text):
-                    print(f"[Speech] ✓ Spoke: {text}")
-                else:
-                    print(f"[Speech] ✗ Failed to speak: {text}")
-                    
+                ok = self.speaker.say(text)
+                print(f"[voice] {'✓' if ok else '✗'} {text}")
             except Empty:
-                # Queue timeout - this is normal, just continue waiting
                 continue
-            except Exception as e:
-                print(f"[Speech] Unexpected error: {e}")
+            except Exception as err:
+                print(f"[voice] error: {err}")
                 break
-        
-        print("[Speech] Worker stopped")
+        print("[voice] stopped")
 
 
-# ============================================================================
-# OBJECT DETECTION
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Detection data model
+# ---------------------------------------------------------------------------
 
 @dataclass
 class Detection:
-    """Represents a detected object"""
-    class_name: str
-    center_x: float
-    center_y: float
-    width: float
-    height: float
+    label:      str
+    cx:         float   # centre-x in pixels
+    cy:         float   # centre-y in pixels
+    w:          float   # bounding box width
+    h:          float   # bounding box height
     confidence: float
-    
+
     @property
     def area(self) -> float:
-        return self.width * self.height
+        return self.w * self.h
 
 
-class ObjectTracker:
-    """Tracks detected objects and manages speech announcements"""
-    
-    def __init__(self, config: Config):
-        self.config = config
-        self.tracked_objects: Dict[Tuple[str, str], Dict] = {}
-    
-    def get_position_label(self, center_x: float, frame_width: int) -> Tuple[str, str]:
-        """Get position (left/center/right) and navigation guidance"""
-        if center_x < frame_width * 0.35:
-            return "left", "move right"
-        elif center_x > frame_width * 0.65:
-            return "right", "move left"
-        return "center", "stay centered"
-    
-    def get_object_key(self, class_name: str, position: str) -> Tuple[str, str]:
-        """Create unique key for tracking objects"""
-        return (class_name.lower(), position)
-    
-    def should_announce(self, detection: Detection, distance: float, 
-                       frame_width: int) -> bool:
-        """Check if object should trigger speech announcement"""
-        position, _ = self.get_position_label(detection.center_x, frame_width)
-        key = self.get_object_key(detection.class_name, position)
-        
-        now = time.time()
-        tracked = self.tracked_objects.get(key)
-        
-        # First detection of this object
-        if tracked is None:
+# ---------------------------------------------------------------------------
+# Position helpers
+# ---------------------------------------------------------------------------
+
+def position_of(cx: float, frame_w: int) -> Tuple[str, str]:
+    """Return (side, navigation_hint) based on where the object sits in frame."""
+    if cx < frame_w * 0.40:
+        return "left", "move right"
+    if cx > frame_w * 0.60:
+        return "right", "move left"
+    return "center", "stay on course"
+
+
+def tracking_key(label: str) -> str:
+    return label.lower()
+
+
+# ---------------------------------------------------------------------------
+# Stabilizer — only surface objects seen across several consecutive frames
+# ---------------------------------------------------------------------------
+
+class Stabilizer:
+    """
+    Filters out single-frame ghost detections.
+    An object has to appear in `min_frames` consecutive frames before we treat it
+    as real and pass it on to the announcement logic.
+    """
+
+    def __init__(self, min_frames: int):
+        self.min_frames = min_frames
+        self._counts:  Dict[str, int] = {}
+        self._objects: Dict[str, Detection] = {}
+
+    def update(self, detections: List[Detection], frame_w: int) -> List[Detection]:
+        seen = set()
+        confirmed = []
+
+        for det in detections:
+            key = tracking_key(det.label)
+            seen.add(key)
+            self._counts[key] = self._counts.get(key, 0) + 1
+            self._objects[key] = det
+            if self._counts[key] >= self.min_frames:
+                confirmed.append(det)
+
+        # Remove objects that disappeared this frame
+        for key in list(self._counts):
+            if key not in seen:
+                del self._counts[key]
+                self._objects.pop(key, None)
+
+        return confirmed
+
+
+# ---------------------------------------------------------------------------
+# Cooldown tracker — avoids repeating the same announcement endlessly
+# ---------------------------------------------------------------------------
+
+class AnnouncementLog:
+    """Remembers what we last said about each object so we don't repeat ourselves."""
+
+    def __init__(self, cooldown: float, distance_threshold: float):
+        self.cooldown = cooldown
+        self.distance_threshold = distance_threshold
+        self._log: Dict[Tuple[str, str], dict] = {}
+
+    def should_speak(self, label: str, side: str, dist: float) -> bool:
+        key = (label.lower(), side)
+        entry = self._log.get(key)
+
+        if entry is None:
+            return True  # never seen before
+
+        if time.time() - entry["t"] < self.cooldown:
+            return False  # too soon
+
+        # Re-announce if the object moved noticeably closer or farther away
+        if abs(dist - entry["dist"]) >= self.distance_threshold:
             return True
-        
-        # Too soon since last announcement
-        if now - tracked["last_seen"] < self.config.SPEECH_REPEAT_COOLDOWN:
-            return False
-        
-        # Distance and position unchanged
-        distance_unchanged = abs(distance - tracked["distance"]) < self.config.DISTANCE_CHANGE_THRESHOLD
-        position_unchanged = tracked["position"] == position
-        if distance_unchanged and position_unchanged:
-            return False
-        
-        return True
-    
-    def update_tracking(self, detection: Detection, distance: float, 
-                       position: str) -> None:
-        """Update tracking information after announcement"""
-        key = self.get_object_key(detection.class_name, position)
-        self.tracked_objects[key] = {
-            "last_seen": time.time(),
-            "distance": distance,
-            "position": position,
-            "class_name": detection.class_name.lower(),
-        }
+
+        # Or if it switched sides (left / center / right)
+        if entry["side"] != side:
+            return True
+
+        return False
+
+    def record(self, label: str, side: str, dist: float):
+        self._log[(label.lower(), side)] = {"t": time.time(), "dist": dist, "side": side}
 
 
-class DistanceEstimator:
-    """Estimates distance to object based on bounding box size"""
-    
-    @staticmethod
-    def estimate(detection: Detection, frame_width: int, frame_height: int) -> float:
-        """Estimate distance using simple heuristic (will be replaced by ML model)"""
-        frame_area = frame_width * frame_height
-        ratio = detection.area / max(frame_area, 1)
-        
-        if ratio > 0.20:
-            return 0.6
-        elif ratio > 0.10:
-            return 1.2
-        elif ratio > 0.05:
-            return 2.0
-        elif ratio > 0.02:
-            return 3.0
-        return 4.5
+# ---------------------------------------------------------------------------
+# Distance estimation (rough heuristic until the real depth model is ready)
+# ---------------------------------------------------------------------------
+
+def estimate_distance(det: Detection, frame_w: int, frame_h: int) -> float:
+    ratio = det.area / max(frame_w * frame_h, 1)
+    if ratio > 0.20: return 0.6
+    if ratio > 0.10: return 1.2
+    if ratio > 0.05: return 2.0
+    if ratio > 0.02: return 3.0
+    return 4.5
 
 
-# ============================================================================
-# MAIN APPLICATION
-# ============================================================================
+# ---------------------------------------------------------------------------
+# LLM narrator — turns detection data into a natural spoken sentence
+# ---------------------------------------------------------------------------
+
+class Narrator:
+    """
+    Asks a local LLM to write one short sentence describing what's in front of the user.
+    The call runs in a thread with a hard timeout so it never blocks the camera loop.
+    If it times out or fails, the caller should fall back to a plain template string.
+    """
+
+    def __init__(self, model: str, timeout: float, max_tokens: int):
+        self.model = model
+        self.timeout = timeout
+        self.max_tokens = max_tokens
+
+    def describe(
+        self,
+        detections: List[Detection],
+        distances: Dict[str, float],
+        frame_w: int,
+    ) -> Optional[str]:
+
+        if not detections:
+            return None
+
+        # Build a short fact list sorted by distance (closest first)
+        sorted_dets = sorted(detections, key=lambda d: distances.get(d.label, 99))
+        facts = []
+        for det in sorted_dets[:3]:
+            dist = distances.get(det.label)
+            if dist is None:
+                continue
+            side, _ = position_of(det.cx, frame_w)
+            facts.append(f"{det.label}, {dist:.1f} m, on the {side}")
+
+        if not facts:
+            return None
+
+        prompt = (
+            "You are a navigation assistant for a blind person. "
+            "Return exactly one sentence, max 10 words. "
+            "Use only object label, distance, and direction. "
+            "Do NOT mention height, size, shape, dimensions or tall.\n\n"
+            "Scene:\n" + "\n".join(facts) + "\n\nSentence:"
+        )
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(
+                    ollama.chat,
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    options={"num_predict": self.max_tokens, "temperature": 0.3},
+                )
+                response = future.result(timeout=self.timeout)
+
+            text = getattr(getattr(response, "message", None), "content", None)
+            return text.strip() if text else None
+
+        except concurrent.futures.TimeoutError:
+            print(f"[llm] timed out after {self.timeout}s")
+            return None
+        except Exception as err:
+            print(f"[llm] error: {err}")
+            return None
+
+
+# ---------------------------------------------------------------------------
+# Main application
+# ---------------------------------------------------------------------------
 
 class AIEye:
-    """Main AI Eye application"""
-    
-    def __init__(self, config: Config = None):
-        self.config = config or Config()
-        self.model = None
-        self.cap = None
-        self.speech_queue = Queue()
-        self.stop_event = threading.Event()
-        self.speech_thread = None
-        self.tracker = ObjectTracker(self.config)
-        self.distance_estimator = DistanceEstimator()
-        
-        self.frame_count = 0
-        self.fps_start_time = time.time()
-        self.current_fps = 0.0
-    
-    def _log(self, message: str) -> None:
-        """Log with timestamp"""
-        print(f"[Main] {message}")
-    
-    def _speak(self, text: str) -> None:
-        """Queue text for speech (non-blocking)"""
-        self.speech_queue.put(text)
-    
+
+    def __init__(self, cfg: Config = None):
+        self.cfg = cfg or Config()
+
+        # Core components (set up in initialize())
+        self.model:    Optional[YOLO] = None
+        self.cap:      Optional[cv2.VideoCapture] = None
+
+        # Speech pipeline
+        self.speech_queue  = Queue()
+        self._stop         = threading.Event()
+        self.speech_thread: Optional[SpeechThread] = None
+
+        # Detection helpers
+        self.stabilizer  = Stabilizer(self.cfg.stable_frames)
+        self.log         = AnnouncementLog(self.cfg.repeat_cooldown, self.cfg.distance_threshold)
+        self.narrator    = Narrator(self.cfg.llm_model, self.cfg.llm_timeout, self.cfg.llm_max_tokens)
+        self.llm_ready   = False
+
+        # FPS counter
+        self._fps_frames = 0
+        self._fps_t      = time.time()
+        self.fps         = 0.0
+
+    # ------------------------------------------------------------------
+    # Logging shorthand
+    # ------------------------------------------------------------------
+
+    def _log(self, msg: str):
+        print(f"[main] {msg}")
+
+    # ------------------------------------------------------------------
+    # Startup
+    # ------------------------------------------------------------------
+
     def initialize(self) -> bool:
-        """Initialize the application"""
-        self._log("Initializing AI Eye...")
-        
-        # Load YOLO model
+        self._log("Starting up AI Eye...")
+
+        # Load YOLO
         try:
-            self._log(f"Loading YOLO model: {self.config.MODEL_PATH}")
-            self.model = YOLO(self.config.MODEL_PATH)
-            self._log("YOLO model loaded ✓")
-        except Exception as e:
-            self._log(f"Failed to load model: {e}")
+            self._log(f"Loading detection model: {self.cfg.model_path}")
+            self.model = YOLO(self.cfg.model_path)
+            self._log("Model ready ✓")
+        except Exception as err:
+            self._log(f"Could not load model: {err}")
             return False
-        
-        # Initialize camera
+
+        # Open camera
         try:
-            self._log(f"Opening camera {self.config.CAMERA_INDEX}")
-            self.cap = cv2.VideoCapture(self.config.CAMERA_INDEX)
+            self._log(f"Opening camera #{self.cfg.camera_index}")
+            self.cap = cv2.VideoCapture(self.cfg.camera_index)
             if not self.cap.isOpened():
-                self._log("Failed to open camera")
+                self._log("Camera not found. Plug in a webcam and try again.")
                 return False
-            self._log("Camera opened ✓")
-        except Exception as e:
-            self._log(f"Failed to open camera: {e}")
+            self._log("Camera ready ✓")
+        except Exception as err:
+            self._log(f"Camera error: {err}")
             return False
-        
-        # Start speech worker thread
-        self.stop_event.clear()
-        self.speech_thread = SpeechWorker(self.speech_queue, self.stop_event)
+
+        # Start speech thread
+        self._stop.clear()
+        self.speech_thread = SpeechThread(self.speech_queue, self._stop, self.cfg.speech_rate)
         self.speech_thread.start()
-        self._log("Speech worker started ✓")
-        
-        # Give speech thread time to initialize
-        time.sleep(self.config.THREAD_INIT_WAIT)
-        
+        time.sleep(self.cfg.startup_wait)   # let it warm up
+        self._log("Voice ready ✓")
+
+        # Connect to Ollama if LLM narration is on
+        if self.cfg.use_llm:
+            self.llm_ready = ensure_ollama(self.cfg.llm_model, self._log)
+            if self.llm_ready:
+                self._warmup_llm()
+            else:
+                self._log("LLM unavailable — will use plain template messages instead.")
+
         return True
-    
-    def detect_objects(self, frame) -> list:
-        """Run YOLO detection on frame"""
-        results = self.model(frame, stream=False, conf=self.config.CONFIDENCE_THRESHOLD)
-        detections = []
-        
-        if results[0].boxes is not None and len(results[0].boxes) > 0:
-            for box in results[0].boxes:
-                confidence = float(box.conf[0])
-                if confidence < self.config.CONFIDENCE_THRESHOLD:
-                    continue
-                
-                class_id = int(box.cls[0])
-                class_name = self.model.names[class_id]
-                x_center, y_center, width, height = box.xywh[0].tolist()
-                
-                detection = Detection(
-                    class_name=class_name,
-                    center_x=x_center,
-                    center_y=y_center,
-                    width=width,
-                    height=height,
-                    confidence=confidence
+
+    def _warmup_llm(self):
+        """Send a tiny request at startup so the model is already loaded when we need it."""
+        self._log(f"Warming up {self.cfg.llm_model}...")
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                f = pool.submit(
+                    ollama.chat,
+                    model=self.cfg.llm_model,
+                    messages=[{"role": "user", "content": "Say the word: ready"}],
+                    options={"num_predict": 3},
                 )
-                detections.append(detection)
-        
+                f.result(timeout=self.cfg.llm_timeout)
+            self._log("LLM warm ✓")
+        except Exception as err:
+            self.llm_ready = False
+            self._log(f"LLM warmup failed ({err}) — switching to template mode.")
+
+    # ------------------------------------------------------------------
+    # Detection
+    # ------------------------------------------------------------------
+
+    def detect(self, frame) -> List[Detection]:
+        results = self.model(
+            frame,
+            stream=False,
+            conf=self.cfg.confidence,
+            iou=self.cfg.iou_threshold,
+            verbose=False,
+        )
+        detections = []
+        boxes = results[0].boxes
+        if boxes is None or len(boxes) == 0:
+            return detections
+
+        for box in boxes:
+            conf = float(box.conf[0])
+            if conf < self.cfg.confidence:
+                continue
+            cls  = int(box.cls[0])
+            name = self.model.names[cls]
+            cx, cy, w, h = box.xywh[0].tolist()
+            detections.append(Detection(name, cx, cy, w, h, conf))
+
         return detections
-    
-    def process_detections(self, detections: list, frame_width: int, frame_height: int) -> None:
-        """Process detections and generate speech/visualizations"""
-        if not detections:
+
+    # ------------------------------------------------------------------
+    # Announcement logic
+    # ------------------------------------------------------------------
+
+    def maybe_announce(self, confirmed: List[Detection], frame_w: int, frame_h: int):
+        if not confirmed:
             return
-        
-        # Get largest detection
-        best_detection = max(detections, key=lambda d: d.area)
-        
-        # Estimate distance
-        distance = self.distance_estimator.estimate(best_detection, frame_width, frame_height)
-        
-        # Get position info
-        position, guidance = self.tracker.get_position_label(best_detection.center_x, frame_width)
-        
-        # Check if we should announce
-        if self.tracker.should_announce(best_detection, distance, frame_width):
-            message = f"{best_detection.class_name}, {distance:.1f} meters, {guidance}."
-            self._speak(message)
-            self.tracker.update_tracking(best_detection, distance, position)
-    
-    def draw_detections(self, frame, detections: list) -> None:
-        """Draw bounding boxes and labels"""
-        if not detections:
-            cv2.putText(frame, "No object detected", (20, 40), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+
+        # Focus on the largest (closest-looking) object
+        best  = max(confirmed, key=lambda d: d.area)
+        dist  = estimate_distance(best, frame_w, frame_h)
+        side, hint = position_of(best.cx, frame_w)
+
+        if not self.log.should_speak(best.label, side, dist):
             return
-        
-        # Get largest for distance display
-        best_detection = max(detections, key=lambda d: d.area)
-        distance = self.distance_estimator.estimate(best_detection, frame.shape[1], frame.shape[0])
-        
-        # Draw all detections
+
+        # Build the plain fallback message now so we always have something to say
+        fallback = f"{best.label}, {dist:.1f} metres, {hint}."
+        self.log.record(best.label, side, dist)
+
+        if self.cfg.use_llm and self.llm_ready:
+            # Fire off LLM call in a daemon thread — camera loop keeps running
+            distances = {
+                d.label: estimate_distance(d, frame_w, frame_h)
+                for d in confirmed
+            }
+            threading.Thread(
+                target=self._llm_then_speak,
+                args=(confirmed, distances, frame_w, fallback),
+                daemon=True,
+            ).start()
+        else:
+            self.speech_queue.put(fallback)
+
+    def _llm_then_speak(
+        self,
+        detections: List[Detection],
+        distances: Dict[str, float],
+        frame_w: int,
+        fallback: str,
+    ):
+        sentence = self.narrator.describe(detections, distances, frame_w)
+        self.speech_queue.put(sentence if sentence else fallback)
+
+    # ------------------------------------------------------------------
+    # Drawing
+    # ------------------------------------------------------------------
+
+    def draw(self, frame, detections: List[Detection], frame_w: int, frame_h: int):
+        if not detections:
+            cv2.putText(frame, "Nothing detected", (20, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (60, 60, 255), 2)
+            return
+
+        best = max(detections, key=lambda d: d.area)
+        dist = estimate_distance(best, frame_w, frame_h)
+
         for det in detections:
-            x1 = int(det.center_x - det.width / 2)
-            y1 = int(det.center_y - det.height / 2)
-            x2 = int(det.center_x + det.width / 2)
-            y2 = int(det.center_y + det.height / 2)
-            
-            color = (0, 255, 0) if det == best_detection else (200, 200, 0)
+            x1 = int(det.cx - det.w / 2)
+            y1 = int(det.cy - det.h / 2)
+            x2 = int(det.cx + det.w / 2)
+            y2 = int(det.cy + det.h / 2)
+            color = (0, 220, 0) if det is best else (180, 180, 0)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(frame, f"{det.class_name} {det.confidence:.2f}", 
-                       (x1, max(20, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-    
-    def draw_ui(self, frame) -> None:
-        """Draw UI elements"""
-        # Title
-        cv2.putText(frame, "AI Eye Detection System", (10, 25), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        
-        # FPS
-        if self.config.DISPLAY_FPS:
-            fps_text = f"FPS: {self.current_fps:.1f}"
-            cv2.putText(frame, fps_text, (frame.shape[1] - 150, 25), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        
-        # Instructions
-        cv2.putText(frame, "Press 'Q' to quit", (10, frame.shape[0] - 10), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-    
-    def update_fps(self) -> None:
-        """Update FPS counter"""
-        self.frame_count += 1
-        elapsed = time.time() - self.fps_start_time
+            label_text = f"{det.label}  {dist:.1f}m" if det is best else det.label
+            cv2.putText(frame, label_text, (x1, max(18, y1 - 8)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+    def draw_hud(self, frame):
+        h, w = frame.shape[:2]
+        cv2.putText(frame, "AI Eye", (12, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        if self.cfg.show_fps:
+            cv2.putText(frame, f"{self.fps:.0f} fps", (w - 100, 28),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 220, 0), 2)
+        cv2.putText(frame, "Q — quit", (12, h - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+
+    def _tick_fps(self):
+        self._fps_frames += 1
+        elapsed = time.time() - self._fps_t
         if elapsed >= 1.0:
-            self.current_fps = self.frame_count / elapsed
-            self.frame_count = 0
-            self.fps_start_time = time.time()
-    
-    def run(self) -> None:
-        """Main application loop"""
+            self.fps = self._fps_frames / elapsed
+            self._fps_frames = 0
+            self._fps_t = time.time()
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
+
+    def run(self):
         if not self.initialize():
-            self._log("Initialization failed")
             return
-        
-        self._log("Starting detection loop...")
-        last_inference_time = 0.0
-        
+
+        self._log("Detection loop running — press Q in the video window to quit.")
+        last_inference = 0.0
+        detections: List[Detection] = []
+
         try:
             while True:
-                success, frame = self.cap.read()
-                if not success:
-                    self._log("Failed to read frame")
+                ok, frame = self.cap.read()
+                if not ok:
+                    self._log("Lost camera feed.")
                     break
-                
-                height, width = frame.shape[:2]
+
+                h, w = frame.shape[:2]
                 now = time.time()
-                
-                # Run inference at specified interval
-                if now - last_inference_time >= self.config.INFERENCE_INTERVAL:
-                    detections = self.detect_objects(frame)
-                    self.process_detections(detections, width, height)
-                    last_inference_time = now
-                
-                # Draw visualization
-                if detections:
-                    self.draw_detections(frame, detections)
-                self.draw_ui(frame)
-                
-                # Display frame
-                cv2.imshow(self.config.WINDOW_NAME, frame)
-                self.update_fps()
-                
-                # Check for quit
+
+                # Run YOLO at the configured rate (not every single frame)
+                if now - last_inference >= self.cfg.inference_interval:
+                    raw         = self.detect(frame)
+                    confirmed   = self.stabilizer.update(raw, w)
+                    self.maybe_announce(confirmed, w, h)
+                    detections  = raw          # draw raw boxes (less laggy feel)
+                    last_inference = now
+
+                self.draw(frame, detections, w, h)
+                self.draw_hud(frame)
+                self._tick_fps()
+
+                cv2.imshow(self.cfg.window_title, frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
-                    self._log("Quit requested by user")
                     break
-                    
+
         except KeyboardInterrupt:
-            self._log("Interrupted by user")
-        except Exception as e:
-            self._log(f"Error in main loop: {e}")
+            pass
+        except Exception as err:
+            self._log(f"Unexpected error: {err}")
         finally:
-            self.cleanup()
-    
-    def cleanup(self) -> None:
-        """Clean up resources"""
-        self._log("Cleaning up...")
-        
+            self.shutdown()
+
+    # ------------------------------------------------------------------
+    # Clean shutdown
+    # ------------------------------------------------------------------
+
+    def shutdown(self):
+        self._log("Shutting down...")
         if self.cap:
             self.cap.release()
-        
         cv2.destroyAllWindows()
-        
-        # Stop speech thread
-        self.stop_event.set()
+
+        # Signal the speech thread to finish and wait for it
+        self._stop.set()
         self.speech_queue.put(None)
         if self.speech_thread:
-            self.speech_thread.join(timeout=self.config.SPEECH_THREAD_TIMEOUT)
-        
-        self._log("Cleanup complete ✓")
+            self.speech_thread.join(timeout=self.cfg.speech_join_timeout)
+
+        self._log("Done.")
 
 
-# ============================================================================
-# ENTRY POINT
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    config = Config()
-    app = AIEye(config)
-    app.run()
+    AIEye().run()
